@@ -1,20 +1,23 @@
+# Pacotes necessários
 library(tidyverse)
-# Leitura do arquivo local
-cofog <- read_csv("C:/Users/Maria Gabriela/Downloads/Dados-abertos-COFOG-GC-2023.csv", 
-                  locale = locale(encoding = "LATIN1"))  # Use UTF-8 se LATIN1 der problema
-
+library(plotly)
 library(readr)
+library(scales)
 
+# Leitura do arquivo local com encoding correto
 cofog <- read_delim("C:/Users/Maria Gabriela/Downloads/Dados-abertos-COFOG-GC-2023.csv", 
                     delim = ";", 
                     locale = locale(encoding = "LATIN1"),
                     trim_ws = TRUE)
-glimpse(cofog)
 
-library(dplyr)
-library(ggplot2)
+# Renomear colunas para facilitar manipulação
+cofog <- cofog %>%
+  rename(
+    cod_cofog = `CLASSIFICACAO COFOG`,
+    valor_rs = `VALOR (R$)`
+  )
 
-# 1) Definir as áreas funcionais (COFOG de primeira ordem)
+# Dicionário de áreas funcionais
 areas_funcionais <- c(
   "701" = "SERVIÇOS PÚBLICOS GERAIS",
   "702" = "DEFESA",
@@ -28,79 +31,120 @@ areas_funcionais <- c(
   "710" = "PROTEÇÃO SOCIAL"
 )
 
-# 2) Criar coluna com código COFOG de 1ª ordem
+# Criar coluna de nível 1 COFOG e recodificar áreas
 cofog <- cofog %>%
   mutate(
-    cod_cofog_nivel1 = substr(as.character(`CLASSIFICACAO COFOG`), 1, 3),
-    `AREA FUNCIONAL` = recode(cod_cofog_nivel1, !!!areas_funcionais)
-  )
-# 2.5) Garantir que o valor esteja numérico
-cofog <- cofog %>%
-  mutate(`VALOR (R$)` = as.numeric(gsub(",", ".", gsub("\\.", "", `VALOR (R$)`))))
+    cod_cofog_nivel1 = substr(as.character(cod_cofog), 1, 3),
+    area_funcional = recode(cod_cofog_nivel1, !!!areas_funcionais),
+    valor_rs = as.numeric(gsub(",", ".", gsub("\\.", "", valor_rs)))  # converter para numérico
+  ) %>%
+  filter(!is.na(valor_rs))  # Remover valores ausentes
 
-# 3) Calcular total por área funcional
+# Agrupar e somar valores por área funcional
 ranking_areas <- cofog %>%
-  group_by(`AREA FUNCIONAL`) %>%
-  summarise(valor_total = sum(`VALOR (R$)`, na.rm = TRUE), .groups = "drop") %>%
+  group_by(area_funcional) %>%
+  summarise(valor_total = sum(valor_rs, na.rm = TRUE), .groups = "drop") %>%
   arrange(desc(valor_total))
 
-# Calcular o valor total de todos os gastos
+# Total geral
 total_gastos <- sum(ranking_areas$valor_total, na.rm = TRUE)
 
+# Função para formatar valores curtos (rótulos das barras)
+formatar_moeda_curta <- function(valor) {
+  if (!is.na(valor)) {
+    if (valor >= 1e12) {
+      return(paste0("R$ ", format(round(valor / 1e12, 1), decimal.mark = ","), " tri"))
+    } else if (valor >= 1e9) {
+      return(paste0("R$ ", format(round(valor / 1e9, 1), decimal.mark = ","), " bi"))
+    } else {
+      return(paste0("R$ ", format(valor, big.mark = ".", decimal.mark = ",")))
+    }
+  } else {
+    return("Valor ausente")
+  }
+}
 
-library(tidyverse)
-library(plotly)
+# Função para tooltip completo
+formatar_moeda_completa <- function(valor) {
+  if (!is.na(valor)) {
+    return(paste0("R$ ", format(round(valor), big.mark = ".", decimal.mark = ",")))
+  } else {
+    return("Valor ausente")
+  }
+}
 
-# Total geral
-total_gastos <- sum(ranking_areas$valor_total)
-
-# Criar coluna de rótulos formatados sem notação científica
+# Aplicar aos rótulos
 ranking_areas <- ranking_areas %>%
-  mutate(rotulo_valor = paste0("R$ ", 
-                               format(round(valor_total), big.mark = ".", decimal.mark = ",", scientific = FALSE)))
+  mutate(
+    rotulo_valor = sapply(valor_total, formatar_moeda_curta),
+    tooltip_text = sapply(valor_total, formatar_moeda_completa)
+  )
 
-# Distância de “nudge” (2% do máximo) para mover todos os rótulos para a direita
+# Distância para deslocar rótulo
 dist_nudge <- max(ranking_areas$valor_total) * 0.02
 
-# Gráfico ajustado
-grafico <- ggplot(ranking_areas, aes(x = reorder(`AREA FUNCIONAL`, valor_total), y = valor_total)) +
-  geom_col(fill = "#2E86AB") +
+# Construção do gráfico com ggplot2
+grafico <- ggplot(ranking_areas, aes(
+  x = reorder(area_funcional, valor_total),
+  y = valor_total,
+  text = tooltip_text,
+  fill = valor_total
+)) +
+  geom_col() +
   geom_text(
     aes(label = rotulo_valor),
-    nudge_y = dist_nudge,   # empurra tudo para a direita
-    hjust = 0,              # alinhado ao início do texto
+    nudge_y = dist_nudge,
+    hjust = 0,
     size = 2.3
   ) +
-  coord_flip(clip = "off") +  # permite extrapolar texto
+  coord_flip(clip = "off") +
   scale_y_continuous(
-    breaks = c(0, 5e11, 1e12, 1.5e12),
-    labels = c("0,0e+00", "500 bilhões", "1 trilhão", "1,5 trilhão"),
-    limits = c(0, 1.7e12),
-    expand = c(0, 0)
+    labels = function(x) {
+      sapply(x, function(v) {
+        if (v == 0) {
+          "R$ 0 bi"
+        } else {
+          formatar_moeda_curta(v)
+        }
+      })
+    },
+    expand = expansion(mult = c(0, 0.2)),
+    breaks = pretty(c(0, max(ranking_areas$valor_total)), n = 6)
+  ) +
+  scale_fill_gradient(
+    low = "#A6CEE3", high = "#1F78B4",
+    name = "Total Gasto (R$)",
+    labels = function(x) sapply(x, formatar_moeda_curta)
   ) +
   labs(
-    title = paste0(
-      "Despesas por função do governo central - Base COFOG 2023\n",
-      "Total dos Gastos: R$ ", 
-      format(round(total_gastos / 1e12, 2), decimal.mark = ",", big.mark = "."), 
-      " trilhões"
-    ),
+    title = paste0("Despesas por função do governo central - Base COFOG 2023\nTotal dos Gastos: R$ ",
+                   format(round(total_gastos / 1e12, 2), decimal.mark = ",", big.mark = "."),
+                   " trilhões"),
     subtitle = "Fonte: Base COFOG 2023 | Elaboração: Maria Gabriela Santos",
     x = "Área Funcional",
     y = "Total Gasto (R$)"
   ) +
-  theme_minimal(base_size = 14) +
+  theme_minimal(base_size = 12) +
   theme(
-    plot.margin = margin(5, 40, 5, 5),     # margem direita maior
-    axis.text.x = element_text(size = 10),
-    axis.text.y = element_text(size = 7),
+    legend.position = "right",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 8),
     axis.title = element_text(size = 10),
-    plot.title = element_text(size = 14, face = "bold"),
-    plot.subtitle = element_text(size = 10)
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    plot.margin = margin(5, 80, 5, 5)
   )
 
-# Tornar interativo
-grafico_interativo <- ggplotly(grafico)
+# Tornar gráfico interativo
+grafico_interativo <- ggplotly(grafico, tooltip = "text")
 
 # Exibir
 grafico_interativo
+
+# Gerar o gráfico interativo com ggplotly
+grafico_interativo <- ggplotly(grafico, tooltip = "text")
+
+# Salvar o gráfico interativo como arquivo HTML
+htmlwidgets::saveWidget(grafico_interativo, "grafico_despesas_funcionais.html")
